@@ -1,67 +1,120 @@
+# ==========================
+# file: fitting_differential_core.py
+# ==========================
 import os
 import math
+from io import StringIO
+
 import numpy as np
 import pandas as pd
-from io import StringIO
 import matplotlib.pyplot as plt
 
-# Helper functions
-def sum_normalize(x):
-    sum_all = sum(x) #sum of all components
-    for i in range(len(x)): 
-        x[i] /= sum_all #normalized
-    return x
+# --------------------------
+# Helper functions (faithful to your pasted core)
+# --------------------------
 
-# x = [3, 4, 6]
-# sum_normalize(x)
+def sum_normalize(x):
+    """Normalize a list/array so the elements sum to 1 (in place for lists)."""
+    total = float(np.sum(x))
+    if total == 0:
+        return x
+    return [xi / total for xi in x]
+
 
 def get_files(directory, extension):
     return [f for f in os.listdir(directory) if f.endswith(extension)]
 
+
 def remove_extension(filename):
     return os.path.splitext(filename)[0]
 
+
 def normal_distribution(mu, sigma):
+    """Return a length-500 discrete normal (1..500) normalized to sum=1."""
     x = np.arange(1, 501)
-    distribution = np.exp(-(x - mu) ** 2 / (2 * sigma ** 2))
+    if sigma == 0:
+        # delta function at mu (clamp to [1, 500])
+        idx = int(round(mu))
+        idx = max(1, min(500, idx))
+        distribution = np.zeros_like(x, dtype=float)
+        distribution[idx - 1] = 1.0
+        return distribution
+    distribution = np.exp(-(x - mu) ** 2 / (2.0 * sigma ** 2))
     return distribution / distribution.sum()
+
 
 def distribution2mean_std(distribution):
     x = np.arange(1, 501)
-    mean = np.sum(distribution * x)
-    std = np.sqrt(np.sum(distribution * (x - mean) ** 2))
+    mean = float(np.sum(distribution * x))
+    std = float(np.sqrt(np.sum(distribution * (x - mean) ** 2)))
     return mean, std
 
+
 def distribution2extinction(distribution, database_dir, host_file='Qext_Si_host1.33.csv', normalize=True):
-    ext_data = pd.read_csv(os.path.join(database_dir, host_file), index_col=0)
-    x = np.arange(1, 501)
-    ext_spectrum = np.zeros(len(ext_data))
-    for i in range(len(x)):
-        ext_spectrum += distribution[i] * ext_data.iloc[:, i]
+    """
+    Linearly mix extinction columns (diameters 1..500) from the host file
+    using the provided distribution, then optionally normalize to max=1.
+    The host file must have wavelength as the first column (index_col=0)
+    and 500 subsequent columns corresponding to diameters 1..500.
+    """
+    ext_path = os.path.join(database_dir, host_file)
+    ext_data = pd.read_csv(ext_path, index_col=0)
+
+    if ext_data.shape[1] < 500:
+        raise ValueError(
+            f"Host file '{host_file}' must have at least 500 columns (has {ext_data.shape[1]})."
+        )
+
+    # weighted sum of columns 1..500
+    ext_spectrum = np.zeros(len(ext_data), dtype=float)
+    for i in range(500):
+        ext_spectrum += distribution[i] * ext_data.iloc[:, i].to_numpy()
+
     ext_spectrum = pd.Series(ext_spectrum, index=ext_data.index)
     if normalize:
-        ext_spectrum = ext_spectrum / ext_spectrum.max()
+        maxv = ext_spectrum.max()
+        if maxv != 0:
+            ext_spectrum = ext_spectrum / maxv
     return ext_spectrum
 
-def extinction2figure(measured, fitted, name):
-    fig, ax = plt.subplots()
-    measured_norm = measured.iloc[:, 0] / measured.iloc[:, 0].max()
-    fitted_norm = fitted / fitted.max()
-    ax.plot(measured.index, measured_norm, label="Experimental", color='firebrick')
-    ax.plot(fitted.index, fitted_norm, label="Fitted", color='royalblue')
+
+def extinction2figure(measured_df, fitted_series, name):
+    """Plot normalized experimental vs. fitted extinction."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    # measured_df: a single-column DataFrame indexed by wavelength
+    measured_norm = measured_df.iloc[:, 0] / measured_df.iloc[:, 0].max()
+    fitted_norm = fitted_series / fitted_series.max()
+
+    ax.plot(measured_df.index, measured_norm, label="Experimental", color='firebrick')
+    ax.plot(fitted_series.index, fitted_norm, label="Fitted", color='royalblue')
     ax.set_xlabel("Wavelength (nm)")
     ax.set_ylabel("Normalized Intensity")
     ax.set_title(f"Fit for {name}")
     ax.legend()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    fig.tight_layout()
     return fig
 
-def run_fitting(file_content, name, material_dir, database_dir, min_wave=400, max_wave=800):
-    df = pd.read_csv(StringIO(file_content))
+
+def run_fitting(file_content, name, database_dir, host_file='Qext_Si_host1.33.csv', min_wave=400, max_wave=800):
+    """
+    Core fitter (grid search over mu, sigma) exactly matching your pasted logic.
+    - file_content: CSV content as string with two numeric columns: wavelength, intensity
+    - name: column/name label for plotting/reporting
+    - database_dir: directory containing host_file (e.g., Qext_Si_host1.33.csv)
+    - host_file: which precomputed extinction matrix file to use
+    - min_wave, max_wave: fitting window
+    Returns: (matplotlib Figure, pandas.DataFrame with results row)
+    """
+    # Load and window the data
+    df = pd.read_csv(StringIO(file_content), header=None)
     df = df.dropna()
     df.columns = ['wavelength', name]
     df = df.set_index('wavelength')
     df = df[(df.index >= min_wave) & (df.index <= max_wave)]
 
+    # Grid search (coarse 10-nm step, as in your code)
     best_mu = 0
     best_sigma = 0
     best_rss = float('inf')
@@ -69,15 +122,16 @@ def run_fitting(file_content, name, material_dir, database_dir, min_wave=400, ma
     for mu in range(50, 251, 10):
         for sigma in range(1, 201, 10):
             dist = normal_distribution(mu, sigma)
-            extinction = distribution2extinction(dist, database_dir)
-            rss = ((df[name] / df[name].max() - extinction) ** 2).sum()
+            extinction = distribution2extinction(dist, database_dir, host_file=host_file, normalize=True)
+            rss = float(((df.iloc[:, 0] / df.iloc[:, 0].max() - extinction) ** 2).sum())
             if rss < best_rss:
                 best_rss = rss
                 best_mu = mu
                 best_sigma = sigma
 
+    # Best distribution and final outputs
     best_dist = normal_distribution(best_mu, best_sigma)
-    extinction = distribution2extinction(best_dist, database_dir)
+    extinction = distribution2extinction(best_dist, database_dir, host_file=host_file, normalize=True)
     mean, std = distribution2mean_std(best_dist)
 
     fig = extinction2figure(df, extinction, name)
@@ -85,124 +139,11 @@ def run_fitting(file_content, name, material_dir, database_dir, min_wave=400, ma
         "Filename": name,
         "Mean Diameter (nm)": round(mean, 2),
         "Std Dev (nm)": round(std, 2),
-        "CV (%)": round(std / mean * 100, 2),
-        "RSS": round(best_rss, 4)
+        "CV (%)": round(std / mean * 100, 2) if mean else np.nan,
+        "RSS": round(best_rss, 6),
+        "Best mu": best_mu,
+        "Best sigma": best_sigma,
+        "Host file": host_file,
+        "Fit range (nm)": f"{min_wave}-{max_wave}",
     }
     return fig, pd.DataFrame([result_data])
-
-# for int
-def normal_fitting(min_mu, max_mu, interval_mu, min_sigma, max_sigma, interval_sigma, best_rss, measurement_extinction_df):
-    best_m = best_mu
-    best_s = best_sigma
-    
-    for mu in range(min_mu, max_mu + 1, interval_mu):
-        for sigma in range(min_sigma, max_sigma + 1, interval_sigma):
-            #distribution = parameter2normal_distribution(mu,sigma)
-            distribution = parameter2normal_distribution(mu,sigma)
-            loss = distribution2cost(distribution, measurement_extinction_df)
-            if(loss < best_rss):
-                best_rss = loss
-                best_m = mu
-                best_s = sigma  
-    return [best_m, best_s, best_rss]
-
-# for float
-def normal_fitting_float(min_mu, max_mu, interval_mu, min_sigma, max_sigma, interval_sigma, best_rss, measurement_extinction_df):
-    best_m = best_mu
-    best_s = best_sigma
-    
-    min_mu = min_mu * 100
-    min_mu = int(min_mu)
-    max_mu = max_mu * 100
-    max_mu = int(max_mu)
-    min_sigma = min_sigma * 100
-    min_sigma = int(min_sigma)
-    max_sigma = max_sigma * 100
-    max_sigma = int(max_sigma)
-    interval_mu = interval_mu *100
-    interval_mu = int(interval_mu)
-    interval_sigma = interval_sigma * 100
-    interval_sigma = int(interval_sigma)
-    
-    for mu in range(min_mu, max_mu + 1, interval_mu):
-        mu_a = float(mu) / 100
-        for sigma in range(min_sigma, max_sigma + 1, interval_sigma):
-            sigma_a = float(sigma) / 100
-            #distribution = parameter2normal_distribution(mu_a,sigma_a)
-            distribution = parameter2normal_distribution(mu_a,sigma_a)
-            loss = distribution2cost(distribution, measurement_extinction_df)
-            if(loss < best_rss):
-                best_rss = loss
-                best_m = mu_a
-                best_s = sigma_a 
-    return [best_m, best_s, best_rss]
-
-def normal_fitting2(min_mu, max_mu, interval_mu, min_sigma, max_sigma, interval_sigma, best_rss, measurement_extinction_df):
-    best_m = best_mu
-    best_s = best_sigma
-    
-    for mu in range(min_mu, max_mu + 1, interval_mu):
-        for sigma in range(min_sigma, max_sigma + 1, interval_sigma):
-            #distribution = parameter2normal_distribution(mu,sigma)
-            distribution = parameter2normal_distribution(mu,sigma)
-            loss = distribution2cost2(distribution, measurement_extinction_df)
-            if(loss < best_rss):
-                best_rss = loss
-                best_m = mu
-                best_s = sigma  
-    return [best_m, best_s, best_rss]
-
-# for float
-def normal_fitting_float2(min_mu, max_mu, interval_mu, min_sigma, max_sigma, interval_sigma, best_rss, measurement_extinction_df):
-    best_m = best_mu
-    best_s = best_sigma
-    
-    min_mu = min_mu * 100
-    min_mu = int(min_mu)
-    max_mu = max_mu * 100
-    max_mu = int(max_mu)
-    min_sigma = min_sigma * 100
-    min_sigma = int(min_sigma)
-    max_sigma = max_sigma * 100
-    max_sigma = int(max_sigma)
-    interval_mu = interval_mu *100
-    interval_mu = int(interval_mu)
-    interval_sigma = interval_sigma * 100
-    interval_sigma = int(interval_sigma)
-    
-    for mu in range(min_mu, max_mu + 1, interval_mu):
-        mu_a = float(mu) / 100
-        for sigma in range(min_sigma, max_sigma + 1, interval_sigma):
-            sigma_a = float(sigma) / 100
-            #distribution = parameter2normal_distribution(mu_a,sigma_a)
-            distribution = parameter2normal_distribution(mu_a,sigma_a)
-            loss = distribution2cost2(distribution, measurement_extinction_df)
-            if(loss < best_rss):
-                best_rss = loss
-                best_m = mu_a
-                best_s = sigma_a 
-    return [best_m, best_s, best_rss]
-
-def parameter2normal_distribution(mu, sigma):
-    y = []
-    if(sigma == 0):
-        for d in x:
-            if(d == mu):
-                y.append(1)
-            else:
-                y.append(0)
-        return y
-    for d in x:
-        y.append(1 / math.sqrt(2 * np.pi * sigma ** 2) * np.exp(-(d - mu) ** 2 / (2 * (sigma ** 2))))
-    y = sum_normalize(y)#normalize
-    return y
-
-min_diameter = 1
-max_diameter = 300
-x = [int(i) for i in range(min_diameter,max_diameter,1)]
-
-q = parameter2normal_distribution(150,10)
-plt.plot(x,q)
-
-
-

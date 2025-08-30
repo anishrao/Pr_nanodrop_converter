@@ -1,99 +1,137 @@
-import os
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import math
-from io import BytesIO
+# Note: Your pasted core also contained several partially-defined functions
+# (normal_fitting*, parameter2normal_distribution using a global x, etc.)
+# that referenced undefined names (best_mu/best_sigma/distribution2cost). Those were
+# omitted here to keep this module runnable and faithful to the working
+# run_fitting() logic you've been using.
 
-from fitting_differential_core import (  # assuming you split core logic from the notebook
+
+# ==========================
+# file: app_fit.py
+# ==========================
+import os
+from io import BytesIO
+import zipfile
+
+import streamlit as st
+import pandas as pd
+
+from fitting_differential_core import (
     get_files,
     remove_extension,
-    normal_fitting,
-    normal_fitting_float,
-    normal_fitting_float2,
-    parameter2normal_distribution,
-    distribution2extinction,
-    distribution2mean_std
+    run_fitting,
 )
 
-def perform_fitting(file_path, data_dir, material_path, db_dir, min_wave=400, max_wave=900, L=1.0, rate=1.0, material_density=2.33):
-    """
-    Performs fitting on a single CSV file and returns a plot and fitting results.
-    """
-    index = "Wavelength"
-    file = os.path.basename(file_path)
-    name = remove_extension(file)
+st.set_page_config(page_title="Si NP Spectrum Fitter", layout="wide")
+st.title("Silicon Nanoparticle Spectrum Fitter")
+st.markdown(
+    "Upload CSV spectra (wavelength, intensity). The app fits each spectrum using a normal-size distribution (1–500 nm) against a precomputed extinction database (e.g., `Qext_Si_host1.33.csv`)."
+)
 
-    # Load normalized data
-    normed_data = pd.read_csv(file_path)
-    normed_data.columns = [index, name]
-    measurement_df = normed_data.set_index(index)
-    measurement_fitting = measurement_df[(measurement_df.index >= min_wave) & (measurement_df.index <= max_wave)]
+with st.sidebar:
+    st.header("Fitting Settings")
+    database_dir = st.text_input(
+        "Database directory (server path)", value="database",
+        help="Directory containing the precomputed extinction CSVs such as `Qext_Si_host1.33.csv`."
+    )
 
-    # Run fitting
-    best_rss = 1e7
-    best_mu = best_sigma = 0
-    max_diameter = 300
+    host_file_options = []
+    if os.path.isdir(database_dir):
+        try:
+            host_file_options = [f for f in get_files(database_dir, ".csv") if f.startswith("Qext_Si_host")]
+        except Exception:
+            host_file_options = []
 
-    best_mu, best_sigma, best_rss = normal_fitting(50, max_diameter - 50, 10, 1, 200, 10, best_rss, measurement_fitting)
-    best_mu, best_sigma, best_rss = normal_fitting(best_mu - 10, best_mu + 10, 1, best_sigma - 10, best_sigma + 10, 1, best_rss, measurement_fitting)
-    best_mu, best_sigma, best_rss = normal_fitting(0, 1, 10, 1, 200, 10, best_rss, measurement_fitting)
-    best_mu, best_sigma, best_rss = normal_fitting_float(best_mu - 1, best_mu + 1, 0.1, best_sigma - 1, best_sigma + 1, 0.1, best_rss, measurement_fitting)
-    best_mu, best_sigma, best_rss = normal_fitting_float2(best_mu - 1, best_mu + 1, 1, best_sigma - 1, best_sigma + 1, 0.1, best_rss, measurement_fitting)
+    default_host = "Qext_Si_host1.33.csv" if "Qext_Si_host1.33.csv" in host_file_options else (host_file_options[0] if host_file_options else "")
+    host_file = st.selectbox(
+        "Host extinction file",
+        options=host_file_options if host_file_options else [default_host],
+        index=host_file_options.index(default_host) if default_host in host_file_options else 0,
+        help="Choose which host medium extinction table to use."
+    )
 
-    best_distribution = parameter2normal_distribution(best_mu, best_sigma)
-    best_extinction = distribution2extinction(best_distribution)
-    mean, std = distribution2mean_std(best_distribution)
+    min_wave = st.number_input("Min wavelength (nm)", min_value=200, max_value=1200, value=400, step=10)
+    max_wave = st.number_input("Max wavelength (nm)", min_value=200, max_value=1200, value=800, step=10)
+    st.caption("Fitting window is applied to both experimental and model spectrum.")
 
-    # Read original spectrum for concentration estimation
-    df_original = pd.read_csv(file_path, index_col=0)
-    df_original = df_original[(df_original.index >= min_wave) & (df_original.index <= max_wave)]
-    peak_wave = float(df_original.idxmax())
-    absorbance = float(df_original.max())
+uploaded = st.file_uploader(
+    "Upload one or more CSV files (two columns: wavelength, intensity)",
+    type=["csv"],
+    accept_multiple_files=True,
+)
 
-    calculation_max_absorbance_perone = float(distribution2extinction(best_distribution, normalize=False).max())
-    calculation_absorbance = calculation_max_absorbance_perone * 0.434 * L 
-    concent = float(absorbance / calculation_absorbance)
+if not os.path.isdir(database_dir):
+    st.warning(f"Database directory '{database_dir}' not found. Please create it on the server and place files like 'Qext_Si_host1.33.csv' inside.")
 
-    x = list(best_distribution.keys())
-    crosssection = volume = diameter = 0
-    for d in x:
-        freq = best_distribution[d-1]
-        diameter += freq * d
-        volume += d ** 3 / 6 * math.pi * 1e-21 * freq
-        crosssection += d ** 2 / 4 * math.pi * 1e-14 * freq
+results_rows = []
+plots = []
 
-    mean_free_path = 1 / (concent * calculation_max_absorbance_perone)
+if uploaded and os.path.isdir(database_dir) and host_file:
+    run_btn = st.button("Run Fitting on Uploaded Files", type="primary")
+    if run_btn:
+        for uf in uploaded:
+            try:
+                content = uf.read().decode("utf-8")
+            except UnicodeDecodeError:
+                content = uf.read().decode("latin-1")
 
-    results = {
-        "Mean Diameter (nm)": mean,
-        "Sigma (nm)": std,
-        "CV (%)": std / mean * 100,
-        "Concentration (nM)": concent * 1e-9 * rate,
-        "Mass Concentration (mg/mL)": concent * volume * material_density * 1e6 * rate,
-        "Particle Volume (mL)": concent * volume * rate,
-        "Total Cross Section (cm^2)": concent * crosssection * rate,
-        "Scattering Cross Section (cm^2)": concent * crosssection * 4 * rate,
-        "Mean Free Path (cm)": mean_free_path / rate,
-        "Peak Wavelength (nm)": peak_wave,
-        "Absorbance at Peak": absorbance * rate,
-        "Fitting Range": f"{min_wave}-{max_wave}",
-        "Rate": rate
-    }
+            name = remove_extension(uf.name)
+            try:
+                fig, result_df = run_fitting(
+                    file_content=content,
+                    name=name,
+                    database_dir=database_dir,
+                    host_file=host_file,
+                    min_wave=int(min_wave),
+                    max_wave=int(max_wave),
+                )
+            except Exception as e:
+                st.error(f"Error fitting {uf.name}: {e}")
+                continue
 
-    # Plot experimental vs fitted
-    fig, ax = plt.subplots()
-    ax.plot(measurement_df.index, measurement_df[name], label="Experimental", color="firebrick")
-    ax.plot(measurement_df.index, best_extinction.values(), label="Fitted", color="royalblue")
-    ax.set_xlabel("Wavelength (nm)")
-    ax.set_ylabel("Normalized Absorbance")
-    ax.legend()
-    ax.set_title(name)
-    plt.tight_layout()
+            # Show plot
+            st.subheader(name)
+            st.pyplot(fig)
 
-    buf = BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close(fig)
+            # Collect plot as PNG for download/zip
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=200)
+            buf.seek(0)
+            plots.append((f"{name}.png", buf.getvalue()))
 
-    return buf, results
+            # Show results table
+            st.dataframe(result_df, use_container_width=True)
+            results_rows.append(result_df)
+
+        # Concatenate results
+        if results_rows:
+            all_results = pd.concat(results_rows, ignore_index=True)
+
+            # Download buttons
+            col1, col2 = st.columns(2)
+            with col1:
+                csv_bytes = all_results.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download Results CSV",
+                    data=csv_bytes,
+                    file_name="fitting_results.csv",
+                    mime="text/csv",
+                )
+            with col2:
+                # ZIP of plots + results CSV
+                zip_buf = BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    # add results csv
+                    zf.writestr("fitting_results.csv", csv_bytes)
+                    # add plots
+                    for png_name, png_bytes in plots:
+                        zf.writestr(png_name, png_bytes)
+                zip_buf.seek(0)
+                st.download_button(
+                    "Download Plots + Results (ZIP)",
+                    data=zip_buf.getvalue(),
+                    file_name="fitting_outputs.zip",
+                    mime="application/zip",
+                )
+
+st.markdown("---")
+st.markdown("**Tip:** Ensure your database CSV (e.g., `Qext_Si_host1.33.csv`) has wavelength as the first column and **500** subsequent columns for diameters 1..500.")
