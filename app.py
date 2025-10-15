@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import zipfile
 from io import BytesIO
+import shutil
 
 # Define directories
 UPLOAD_FOLDER = "uploads"
@@ -15,6 +16,19 @@ PLOTS_FOLDER = "plots"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(PLOTS_FOLDER, exist_ok=True)
+
+def clear_output_folders():
+    """Delete contents of OUTPUT_FOLDER and PLOTS_FOLDER."""
+    for folder in [OUTPUT_FOLDER, PLOTS_FOLDER]:
+        for filename in os.listdir(folder):
+            file_path = os.path.join(folder, filename)
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                st.warning(f"Could not delete {file_path}: {e}")
 
 def process_tsv(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -58,7 +72,7 @@ def plot_csv(csv_file_path, save_plot=False):
     ax.plot(df.iloc[:, 0], df.iloc[:, 1])
     ax.set_xlabel("Wavelength")
     ax.set_ylabel("Extinction")
-    ax.set_xlim(350,850)
+    ax.set_xlim(350, 850)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_title(os.path.basename(csv_file_path))
@@ -77,6 +91,9 @@ st.markdown("Upload a Nanodrop .tsv file and download processed .csv files.")
 uploaded_file = st.file_uploader("Choose a .tsv file", type=["tsv"])
 
 if uploaded_file is not None:
+    # Clear previous outputs before processing the new file
+    clear_output_folders()
+
     file_path = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
