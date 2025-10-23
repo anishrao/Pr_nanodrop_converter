@@ -30,7 +30,7 @@ def clear_output_folders():
             except Exception as e:
                 st.warning(f"Could not delete {file_path}: {e}")
 
-# 🔥 MODIFIED FUNCTION: Uses the robust sample-detection logic and writes directly to CSV
+# 🔥 CORRECTED FUNCTION: Uses the robust sample-detection logic and numeric filtering
 def process_and_convert_tsv(file_path):
     """
     Reads a Nanodrop TSV, identifies spectra using the 'Sample' tag, 
@@ -76,33 +76,39 @@ def process_and_convert_tsv(file_path):
                  is_data_section = True
                  continue # Skip the header row itself
             
-            # 2. Skip other known metadata/control lines, even in the data section
+            # 2. Skip known metadata/control lines
             if any(keyword in lower_line for keyword in ["sample", "//wlcalib", "//qspecend", "date", "am", "pm"]):
-                is_data_section = False # Exit data section if control lines appear again
+                # If these appear, stop looking for data in this block
+                is_data_section = False
                 continue
                 
             # 3. Process lines only once we're in the confirmed data section
             if is_data_section:
-                # Assuming data is tab-separated, check if it looks like data (starts with a number)
-                # and isn't empty/metadata.
+                # Check for two columns and numeric content in the first two columns
                 parts = line.split('\t')
-                if len(parts) >= 2 and parts[0].replace('.', '', 1).isdigit():
-                    # Keep the raw tab-separated parts for writing
-                    data_rows.append(parts)
+                
+                # Filter out empty or non-data lines within the data section
+                if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
+                    try:
+                        # CRITICAL FIX: Attempt to convert the first two elements to float.
+                        # This reliably identifies numeric data and filters out non-data lines.
+                        float(parts[0])
+                        float(parts[1])
+                        data_rows.append(parts)
+                    except ValueError:
+                        # Ignore lines that aren't numeric data (e.g., control lines)
+                        continue
             
         # Write the data to the CSV file
         if data_rows:
             with open(csv_path, "w", newline="", encoding="utf-8") as csv_f:
                 writer = csv.writer(csv_f, delimiter=",")
-                # The old logic skipped the first 10 lines and every second line (i % 2 == 1). 
-                # With the robust detection, we only write the actual data rows.
                 writer.writerows(data_rows)
         else:
             st.warning(f"Could not find valid data for sample: {sample_name_line}. Skipping.")
 
 
 def plot_csv(csv_file_path, save_plot=False):
-    # This function remains largely the same, but must handle the absence of a header row.
     
     # Use 'header=None' as the conversion function now only writes data rows
     try:
@@ -119,6 +125,7 @@ def plot_csv(csv_file_path, save_plot=False):
     
     # Ensure columns 0 and 1 are numeric before plotting
     try:
+        # Use coerce to turn non-numeric values (if any) into NaN, which dropna handles
         x_data = pd.to_numeric(df.iloc[:, 0], errors='coerce')
         y_data = pd.to_numeric(df.iloc[:, 1], errors='coerce')
         
@@ -129,6 +136,7 @@ def plot_csv(csv_file_path, save_plot=False):
         
     except Exception as e:
         st.error(f"Error plotting data from {csv_file_path}: {e}")
+        plt.close(fig) 
         return None
         
     ax.set_xlabel("Wavelength")
@@ -150,7 +158,7 @@ def plot_csv(csv_file_path, save_plot=False):
 
 # ---------------- Streamlit App ----------------
 st.title("Nanodrop .TSV to .CSV Converter (Robust)")
-st.markdown("Upload a Nanodrop .tsv file and download processed .csv files. This version detects samples by name.")
+st.markdown("Upload a Nanodrop .tsv file and download processed .csv files. This version reliably detects and filters individual samples.")
 
 uploaded_file = st.file_uploader("Choose a .tsv file", type=["tsv"])
 
@@ -165,7 +173,7 @@ if uploaded_file is not None:
 
     st.success(f"File '{uploaded_file.name}' uploaded successfully!")
 
-    # Call the new, robust processing function
+    # Call the robust processing function
     process_and_convert_tsv(file_path)
 
     st.info("Processing complete. Download your processed files:")
