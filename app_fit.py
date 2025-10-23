@@ -1,13 +1,3 @@
-# Note: Your pasted core also contained several partially-defined functions
-# (normal_fitting*, parameter2normal_distribution using a global x, etc.)
-# that referenced undefined names (best_mu/best_sigma/distribution2cost). Those were
-# omitted here to keep this module runnable and faithful to the working
-# run_fitting() logic you've been using.
-
-
-# ==========================
-# file: app_fit.py
-# ==========================
 import os
 from io import BytesIO
 import zipfile
@@ -53,6 +43,23 @@ with st.sidebar:
     max_wave = st.number_input("Max wavelength (nm)", min_value=200, max_value=1200, value=800, step=10)
     st.caption("Fitting window is applied to both experimental and model spectrum.")
 
+    st.header("Weight % Calculation")
+    # 🔥 CHANGE 1: New inputs for density needed for Weight % calculation
+    si_density = st.number_input(
+        "Si Nanoparticle Density ($\mathbf{g/cm^3}$)", 
+        value=2.33, 
+        step=0.01, 
+        format="%.2f",
+        help="Density of Silicon (Si) nanoparticles."
+    )
+    host_density = st.number_input(
+        "Host Density ($\mathbf{g/cm^3}$)", 
+        value=1.00, 
+        step=0.01, 
+        format="%.2f",
+        help="Density of the solvent/host medium (e.g., Water is 1.00 g/cm³)."
+    )
+
 uploaded = st.file_uploader(
     "Upload one or more CSV files (two columns: wavelength, intensity)",
     type=["csv"],
@@ -88,6 +95,28 @@ if uploaded and os.path.isdir(database_dir) and host_file:
                 st.error(f"Error fitting {uf.name}: {e}")
                 continue
 
+            # 🔥 CHANGE 2: Calculate Weight % from Volume Fraction (Vol. Frac.)
+            # This is the standard conversion: Weight % = (Mass_NP / Total_Mass) * 100
+            
+            # --- WEIGHT % CALCULATION ---
+            volume_fraction_col = 'Volume Fraction' # Assumed name for the column returned by run_fitting
+            
+            if volume_fraction_col in result_df.columns:
+                V_frac = result_df[volume_fraction_col]
+                
+                # Weight Fraction (W_frac) calculation:
+                # W_frac = (V_frac * rho_Si) / [(V_frac * rho_Si) + ((1 - V_frac) * rho_Host)]
+                numerator = V_frac * si_density
+                denominator = (V_frac * si_density) + ((1 - V_frac) * host_density)
+                
+                weight_fraction = numerator / denominator
+                
+                # Add the new column to the result DataFrame
+                result_df['Weight %'] = (weight_fraction * 100).round(4).astype(str) + ' %'
+            else:
+                st.warning(f"Could not find required column '{volume_fraction_col}' in results for {uf.name}. Cannot calculate Weight %.")
+            # --- END WEIGHT % CALCULATION ---
+            
             # Show plot
             st.subheader(name)
             st.pyplot(fig)
@@ -98,17 +127,18 @@ if uploaded and os.path.isdir(database_dir) and host_file:
             buf.seek(0)
             plots.append((f"{name}.png", buf.getvalue()))
 
-            # Show results table
+            # Show results table (now includes Weight %)
             st.dataframe(result_df, use_container_width=True)
             results_rows.append(result_df)
 
         # Concatenate results
         if results_rows:
             all_results = pd.concat(results_rows, ignore_index=True)
-
+            
             # Download buttons
             col1, col2 = st.columns(2)
             with col1:
+                # Ensure the 'Weight %' column is handled correctly when saving to CSV
                 csv_bytes = all_results.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "Download Results CSV",
