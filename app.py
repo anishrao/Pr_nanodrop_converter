@@ -30,7 +30,7 @@ def clear_output_folders():
             except Exception as e:
                 st.warning(f"Could not delete {file_path}: {e}")
 
-# 🔥 CORRECTED FUNCTION: Uses the robust sample-detection logic and numeric filtering
+# 🔥 FINAL CORRECTED FUNCTION: Fixes the is_data_section logic for interleaved metadata
 def process_and_convert_tsv(file_path):
     """
     Reads a Nanodrop TSV, identifies spectra using the 'Sample' tag, 
@@ -52,15 +52,11 @@ def process_and_convert_tsv(file_path):
     # Process each sample separately
     for i in range(len(sample_positions)):
         start_idx = sample_positions[i]
-        # End index is the start of the next sample, or the end of the file
         end_idx = sample_positions[i + 1] if i + 1 < len(sample_positions) else len(lines)
 
-        # Extract the sample name from the 'Sample' line and sanitize it
         sample_name_line = lines[start_idx].strip()
-        # Use the whole line as a name, and clean it up (e.g., "Sample 1" -> "Sample_1")
         sample_name_safe = re.sub(r'\W+', '_', sample_name_line) 
         
-        # Define the output CSV path
         csv_path = os.path.join(OUTPUT_FOLDER, f"{sample_name_safe}.csv")
 
         data_rows = []
@@ -68,35 +64,36 @@ def process_and_convert_tsv(file_path):
         
         # Process lines for the current spectrum
         for line in lines[start_idx:end_idx]:
+            if not line:
+                continue
+                
             lower_line = line.lower()
             
-            # --- Robust Data Filtering Logic ---
             # 1. Look for the header row to confirm the data section starts
             if lower_line.startswith("wavelength") or "nm" in lower_line:
                  is_data_section = True
                  continue # Skip the header row itself
             
-            # 2. Skip known metadata/control lines
+            # 2. Skip known metadata/control lines (DO NOT reset is_data_section)
+            # This allows the data section to remain TRUE even if metadata is present.
             if any(keyword in lower_line for keyword in ["sample", "//wlcalib", "//qspecend", "date", "am", "pm"]):
-                # If these appear, stop looking for data in this block
-                is_data_section = False
                 continue
                 
             # 3. Process lines only once we're in the confirmed data section
             if is_data_section:
-                # Check for two columns and numeric content in the first two columns
-                parts = line.split('\t')
-                
-                # Filter out empty or non-data lines within the data section
-                if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
+                # Use a reliable way to split the line, handling tabs or multiple spaces
+                parts = re.split(r'\t| {2,}', line.strip()) 
+                parts = [p.strip() for p in parts if p.strip()]
+
+                if len(parts) >= 2:
                     try:
-                        # CRITICAL FIX: Attempt to convert the first two elements to float.
-                        # This reliably identifies numeric data and filters out non-data lines.
+                        # CRITICAL: Attempt to convert the first two elements to float.
                         float(parts[0])
                         float(parts[1])
+                        
                         data_rows.append(parts)
                     except ValueError:
-                        # Ignore lines that aren't numeric data (e.g., control lines)
+                        # Ignore lines that are non-numeric data
                         continue
             
         # Write the data to the CSV file
@@ -104,13 +101,13 @@ def process_and_convert_tsv(file_path):
             with open(csv_path, "w", newline="", encoding="utf-8") as csv_f:
                 writer = csv.writer(csv_f, delimiter=",")
                 writer.writerows(data_rows)
+            st.success(f"Successfully processed and saved: {sample_name_safe}.csv")
         else:
             st.warning(f"Could not find valid data for sample: {sample_name_line}. Skipping.")
 
 
 def plot_csv(csv_file_path, save_plot=False):
-    
-    # Use 'header=None' as the conversion function now only writes data rows
+    # This function remains the same as the previous correct version
     try:
         df = pd.read_csv(csv_file_path, header=None)
     except pd.errors.EmptyDataError:
@@ -123,13 +120,10 @@ def plot_csv(csv_file_path, save_plot=False):
 
     fig, ax = plt.subplots(figsize=(10, 8))
     
-    # Ensure columns 0 and 1 are numeric before plotting
     try:
-        # Use coerce to turn non-numeric values (if any) into NaN, which dropna handles
         x_data = pd.to_numeric(df.iloc[:, 0], errors='coerce')
         y_data = pd.to_numeric(df.iloc[:, 1], errors='coerce')
         
-        # Drop NaN values introduced by conversion errors
         plot_df = pd.DataFrame({'Wavelength': x_data, 'Extinction': y_data}).dropna()
         
         ax.plot(plot_df['Wavelength'], plot_df['Extinction'])
@@ -141,7 +135,6 @@ def plot_csv(csv_file_path, save_plot=False):
         
     ax.set_xlabel("Wavelength")
     ax.set_ylabel("Extinction")
-    # Set the standard Nanodrop range for better visualization
     ax.set_xlim(350, 850) 
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -150,23 +143,21 @@ def plot_csv(csv_file_path, save_plot=False):
     if save_plot:
         plot_path = os.path.join(PLOTS_FOLDER, Path(csv_file_path).stem + ".png")
         fig.savefig(plot_path)
-        plt.close(fig) # Close figure to free up memory
+        plt.close(fig) 
         return plot_path
 
     plt.close(fig)
-    return None # Return None if not saving
+    return None 
 
 # ---------------- Streamlit App ----------------
-st.title("Nanodrop .TSV to .CSV Converter (Robust)")
-st.markdown("Upload a Nanodrop .tsv file and download processed .csv files. This version reliably detects and filters individual samples.")
+st.title("Nanodrop .TSV to .CSV Converter (Robust V4)")
+st.markdown("Upload a Nanodrop .tsv file and download processed .csv files. This version has enhanced splitting logic for improved compatibility.")
 
 uploaded_file = st.file_uploader("Choose a .tsv file", type=["tsv"])
 
 if uploaded_file is not None:
-    # Clear previous outputs before processing the new file
     clear_output_folders()
 
-    # Save the uploaded file to the UPLOAD_FOLDER
     file_path = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
@@ -178,13 +169,12 @@ if uploaded_file is not None:
 
     st.info("Processing complete. Download your processed files:")
 
-    # Get the list of generated CSV files
     sorted_files = sorted([f for f in os.listdir(OUTPUT_FOLDER) if f.endswith(".csv")])
 
     if not sorted_files:
-        st.warning("No CSV files were generated. Check the file format.")
+        st.warning("No CSV files were generated. Please check the file format or try manually inspecting the file.")
     
-    # Display download buttons and plot options for each file
+    # Display download buttons and plot options (rest of the Streamlit app logic)
     for file in sorted_files:
         csv_path = os.path.join(OUTPUT_FOLDER, file)
         col1, col2 = st.columns([3, 1])
@@ -200,16 +190,13 @@ if uploaded_file is not None:
                 )
         
         with col2:
-            # Use unique key for each button
             plot_button_key = f"plot_{file}" 
             if st.button("Plot", key=plot_button_key):
                 plot_path = plot_csv(csv_path, save_plot=True)
                 if plot_path:
                     st.success(f"Plot generated for {file}")
-                    # Display the plot in the app
                     st.image(plot_path, caption=file, use_column_width=True)
                     
-                    # Provide a separate download button for the plot
                     with open(plot_path, "rb") as pf:
                         st.download_button(
                             label="Download Plot",
@@ -223,10 +210,8 @@ if uploaded_file is not None:
     if sorted_files and st.button("Download All CSVs and Plots as ZIP", key="dl_all_zip"):
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zipf:
-            # Add CSVs
             for f in sorted_files:
                 zipf.write(os.path.join(OUTPUT_FOLDER, f), arcname=f)
-            # Add Plots
             for f in os.listdir(PLOTS_FOLDER):
                 zipf.write(os.path.join(PLOTS_FOLDER, f), arcname=f)
 
